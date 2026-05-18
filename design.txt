@@ -1,0 +1,304 @@
+BLACK PHANTOM'S C COMPILER DESIGN
+=================================
+
+This file describes principle design of the Black Phantom's C compiler.
+
+Black Phantom's C is written using the book "Modern Compiler Implementation in C" as guidance and the final draft of the ANSI/ISO standard 9899:1999 for the C programming language (also known as C99 or C9x).
+
+BPC was intended to be fully ISO/ANSI C compliant compiler. Of course, reaching such an ambitious goal for a one-semester-course project is an overkill and approaching commercial quality was impossible - mostly due to limited testing time and resources. Nonevertheless all the principle parts of the standard were implemented.
+
+The rest of this document describes main design desicions taken, pitfalls and how they were overcome.
+
+NOTE: this document does not restates the ISO standard's definitions for the C language. These definitions in most cases are completely omitted or referred to through the relevant clause and verse number. This document only describes how BPC implements the standard's requirements for processing C source files.
+
+
+1. FUNCTIONAL OVERVIEW
+----------------------
+
+BPC is a four-stage compiler. For the studying purposes all stages were designed as separate modules, most of which interact through temporary files. Such a design isn't noticeably slower on today's computer systems, but allows easier debugging. Besides, output of every stage can be examined separately.
+
+They different stages' handlers are easily found in the separate source files in the project:
+
+(o) preprocessor, code for which resides in the file 'pproc.c'.
+
+(o) lexical parser, code is found in file 'lexer.c', principle data structures - in file 'lexer.h'
+
+(o) grammatical parser. Due to high complexity of the C grammar parser the code was separated to several files:
+	- code related to parsing expressions is found in file 'parser.c'
+	- code that handles parsing of statements is found in file 'statements.c'
+	- code that handles parsing of declarations is found in file 'declarations.c'
+	- code that handles symbol tables is found in the file file 'symbols.c'
+	- data structures and functions' prototypes - in file 'parser.h'
+
+(o) assmebly code generator is found in file 'codegen.c'
+
+Complying to translation phases laid out in the ISO standard (5.1.1), BPC passes the compiled program through the following steps:
+
+1) Trigraph replacement
+2) Backslash + new-line sequences removal
+3) Preprocessing: headers / source files inclusion, conditional code removal, macro processing and replacement
+4) Lexical processing, source file is broken into linked list of lexical tokens for easier traversing.
+5) Parsing of global declarations, including function definitions
+6) Parsing of local declarations and statements, as part of parsing function definition
+7) Parsing of expressions, as part of parsing statements
+8) Generation of intermediate code
+9) Generation of assembly code from the intermediate
+
+
+2. PREPROCESSOR
+---------------
+
+The preprocessor's code is contained in file 'pproc.c'
+
+The preprocessor takes source file as input and produces preprocessed file (with the same name and appended '.pp' suffix).
+
+Preprocessing is handled in three stages according to the specification of the ISO standard (5.1.1):
+
+i) trigraph replacement
+ii) backslash + new-line sequences removal
+iii) handling preprocessing directives
+
+Each of the stages results in a temporary file suffixed with '.<stage_number>'. Main source file usually ends with '.pp.1', '.pp.2' and 'pp.3', for included files and headers it may differ. The temporary file from every stage serves as source for the next stage. Output from stage 3 serves as the preprocessed stream (copied to file without a stage suffix).
+
+Included files are parsed recursively, according to the standard's definition. Before being passed for preprocessing, they are copied to the working directory and applied suffix '.temp.NN', where NN is value of global included files counter. This way, there may be several 'time.h' files included from different directories, and their names won't collide. Source file inclusion is specified in clause (6.10.2)
+
+Conditional compilation is handled recursively for nested "#if"s and linearly of every level for "elif"/"endif" modifiers. There is a global flag which control whether currently lines are processed and sent to output stream or ignored. This flag is saved on every recursive call, possibly modified and restored just before return. Specification for conditional inclusion is in ISO standard (6.10.1)
+
+Macros are processed according to specification in (6.10.3). Macros are kept in a hash table, similar to symbol tables. Before macro is processed, it is prepared - parsed to name and formal arguments list and then either added (as part of "#define" directive processing or replaced.
+
+For processing condition for "if" statements the preprocessor calls the general parse_expression() function with modifier flags that tell it to ignore all symbols and parse only constant expressions (PARSE_PPROC_CONDITION). When handling such expressions, the symbol tables are still empty. Conforming to the standard's requirements, occurrence of every symbol in such an expression is replaced with an integer constant 0, except for when the symbol is operand for "defined" unary operator. PARSE_PPROC_CONDITION flag also tells the parser to treat "defined" as a keyword token, and not as an identifier (which is the general case for the grammar parser stage). See GRAMMAR PARSER for more details on parsing expressions.
+
+
+3. LEXICAL PARSER
+-----------------
+
+Lexical parser's code is contained in file 'lexer.c'
+
+The lexical parser breaks the preprocessed stream into linked list of lexical tokens, according to specifications in (6.4) It reports lexical errors (unrecognized tokens).
+
+
+4. GRAMMAR PARSER
+-----------------
+
+Lexical parser's code is contained in file 'parser.c'
+
+The parser receives for input the preprocessed stream from the proprocessor.
+
+
+SYMBOL TABLES
+
+The parser works on the global level, as specified in (6.7). Declarations fill the global symbol hash tables.
+
+There are four different global symbol tables: variables (or just symbols) tables, types tables, functions tables and string literals tables.
+
+Except for string literals (which will be described further) the hash tables keep symbol as key and record structure as argument. Record structure is a general-purpose record suitable for holding every type. It contains specification for basic types, list of pointer modifiers and specifiers for pointers, dynamic array or indices for arrays and references for structure and union types and functions. Additionally, for symbol tables "addr" field contain either absolute (global tables) or relative (local tables). A special modifier "is_var" specifies whether the record is a legitimate variable. Hint variable "value_valid" was intended for optimizer to indicate that the variable holds a constant value and reference to it may be optimized away, but currently it is not used.
+
+Strcuture records are suitable for struct/union references from general record type. They hold two symbol tables - one for members and one for types, that define the structure's namespace. There is also an alias linked list of members that reflects the order in which members appeared in the declaration. This is due to the requirement in the standard that the members shall appear in the same order as they were declared, when the structure is accessed as an array of "unsigned chars". Functions are not legal members ot a structure union, but function pointers are.
+
+Functions records define a function reference from general record type. There is a linked list of general record structures that correspond to function's formal parameters and a definition of the return type. 
+NOTE: function records are suitable only for function tables, and may be declared only in the global scope. Function pointers are legal variables and may be declared wherever variables can be declared: in global scope, function parameters scope, local tables or as structure members.
+
+Type records define "typedefed" types or tagged structures/unions/enumerations. For the purpose of enumerations there is a distinct type - a named enumeration constant, which is defined also through the general record type. A "typedefed" typ may refer to another tagged or "typedefed" type.
+
+String literals are generally not relevant to symbol tables. They are placed in a distinct symbol table just for a convenience of use of the same lookup and hashing functions and the same data structures. The name of a string literal is a literal itself; "value" array contains its number (which will expand to "__litNN" name in the resulting assembler file); other record fields are not valid.
+
+
+PARSING DECLARATIONS
+
+Declarations are parsed in accordance to the specification in clause (6.7). Declarations are parsed consequently, in three stages. On every stage the first token that doesn't belong to the groups of accepted tokens constitutes transfer to the next stage.
+
+
+i) In the first stage storage-class specifiers, type specifiers, type qualifiers and function specifiers are accepted. According to the standard, specifiers and qualifiers may appear in any order; incompatible specifiers or qualifiers are not accepted (e.g. "long" after "short"). Type specification is stored as bitmask in general record structure for the declarator for further reference.
+
+ii) In the second stage pointer specifiers and qualifiers are accepted with parentheses that specify grouping. Grouping is association of pointer specifier *, either to the left or to the right. It is meaningful in complex situations, like:
+
+	int	(*a)( int );
+
+Without parentheses around "*a" the  pointer specifier would associate to the left and the declarations would declare "a" to be function receving a single parameter of type "int" and returning value of type "pointer to int". As written, it declares a variable "a" of type "pointer-to-function that receives a single parameter of type int and returns value of type int".
+
+During function's declaration a list of formal parameters is built, function record is filled and added to the functions symbol table.
+
+iii) in the third stage initializers are parsed. This stage is optional, end-of-declaration token , or ; may follow the second stage. If initializers are present they are treated as a constant expression (6.7.8). Main expression parser is called with flags specifying that only constant expressions are accepted.
+
+The behavior of declarstions parser is modified by "flags" parameter. If parsing declarations on global level, assembly directives to reserve global space with given values are generated. If parsing on local level, assembly statements to set variables to specified values are generated.
+
+Initialization generator uses "__asm" / "__endasm" bypass in the intermediate code.
+
+If functions declaration ends with { token, it is recognized as function's definition and the statements parser is called.
+
+
+PARSING STATEMENTS
+
+Function definition is treated by the statements parser as one compound statement (6.8.2) Each compound statement may have its own environment (local symbol tables). Environments are organized as global stack of dynamically allocated hash tables. On entry to every compound statement the new empty environment record is created, but hash tables are not allocated. If declarations appear at the beginning of the compound statement, the hash tables are allocated, declarations are processed and code to reserve stack frame is generated.
+
+Statements parser accepts all kinds of statements that are specified in (6.8).
+
+
+PARSING EXPRESSIONS
+
+Expressions parser is called by the statements parser (to parse conditional statements, loop conditions, expression statements, switch selection statements and return expressions), by the preprocessor (to parse conditional inclusion controlling expressions) and by the declarations parser (to parse initializer expressions). The expressions parser is a normal LR(1) parser which is implemented with deterministic finite automaton with recursion.
+
+The expressions parser accepts tokens until one of end-of-expression (terminating) tokens is encountered: ',' ':' ';' ')' ']' etc. It also receives modifier flags that determine whether , is treated as end-of-expression token (function argument or declaration parser) or as a binary operator comma (in-statement expression). ':' token is treated as end-of-expression marker if parsing ternary ?: operator.
+
+The expressions parser parse_expression() calls function get_bin_operand() to parse a single operand suitable for binary operation. The parser accepts the expression if end-of-expression marker is shifted after any binary operand, but not after operator.
+
+parse_expression() and get_bin_operand() are mutually recursive functions. get_bin_operand() calls parse_expression when it encounters parenthesized primary expression (6.5.1-4).
+
+get_bin_operand() parses and accepts primary expressions (6.5.1), postfix expressions (6.5.2) and prefix unary operations (6.5.3). Postfix expressions are parsed serially, while unary operators are applied recursively.
+
+The recursive parse_expression() function takes modifier "dfa_sel", which defines current associativity. The implemented parsing algorithm processes serially (reduces) left-associating operators (where the "next" - looked-ahead operator doesn't have higher precedence over "this") and recursively right-associating operators (shifts in).
+
+
+PARSE TREE
+
+As tokens are shifted, the parser constructs a ternary parse tree. Each node has three children - left and right operands and operator. It can fit into one of the following cases:
+
+i) if the node represents a variable which has a record in one of the symbol tables, a numeric constant, a string literal or a character constant(terminator), it must be a leaf node.
+
+ii) if the node represents result of an unary operation, its left child operand is NULL, operator and right operand represent the operation.
+
+iii) if the node represents a binary or postfix operation, all its children are non-0.
+
+iv) if the node represents types conversion, its operator and right operand children are both NULL.
+
+v) normally all three children of operator node are NULL. The single exception is a ternary operator ?:, where the condition is represented by the left operator and both possible results reside as operator's left and right children. right child of the node is NULL.
+
+The resulted parse tree is unambiguos leftmost-derived tree. That is, left operand always takes precedence over the right operand. For the matter of parsing, assignment operators are treated just as binary operators.
+
+The parse tree is very easy to manipulate with basic DFS pass.
+
+
+INTERMEDIATE CODE
+
+Statements parser and expression parser generate intermediate code. Intermediate code is left in the file with the name the same as the source and extension '.im' instead of '.c'.
+
+In intermediate code the following statements are allowed:
+
+i) dest <- src1 @ src2 [ type-spec ]
+
+where @ is any binary operator valid in C (including assignment and comparison operators)
+
+type-spec takes one of the following form:
+
+INT1, INT2, INT4
+UINT1, UINT2, UINT4
+FP4, FP8, FP10
+$N - where N is size of aggregate type
+
+INT, UINT, FP, $ specify signed integer, unsigned integer, floating-point number and aggregate type, respectively. The following number designates number of bytes.
+
+ii) dest <- src [ type-spec ]
+
+simple assignment
+
+iii ) dest <- src ( dest-type-spec <= src-type-spec )
+
+specifies conversion
+
+iv ) dest <- @ src [ type-spec ]
+
+specifies any unary operation valid in C
+
+v) if ( src ) goto label
+
+src is any variable or temporary.
+label is generated label.
+
+The statement branches to label if src != 0
+
+vi) if ( !src ) goto label
+
+The same as (v), but src is compared for equality to 0.
+
+vii) label:
+
+Constitutes a label
+
+viii) goto label
+
+Unconditionally branch to label
+
+ix) __call label
+
+Call label
+
+x) __push_arg src size
+
+pushes argument src for function call - total size bytes. Bytes is a multiple of 4.
+
+xi) __asm / __endasm
+
+All lines between __asm and __endasm are transferred without changes to output assembly stream.
+
+In order to produce intermediate code, the parser makes two passes through the constructed parse trees. Each pass is a DFS. During the first all non-terminals are assigned types. This pass (assign_temp_types() function)implements types conversions and integer promotions (6.3). The second pass assigns temporary names to non-terminals, according to their types (assign_temp_names() function).
+
+Finally, the print_parse_tree() function makes another DFS pass and creates intermediate code from the parse tree.
+
+
+5. CODE GENERATOR
+-----------------
+
+The code generator's code resides in file 'codegen.c'. It takes as input intermediate code (file with extension '.im') and produces assembly source file (the same name, but extension '.im' is replaced with '.asm').
+
+It has the following responsibilities:
+
+1) Generate appropriate assembly definitions for symbols declared in global tables.
+2) Generate assembly code for every intermediate code statement.
+
+The code generator assigns integer registers EAX, EBX, ECX, EDX, ESI, EDI for integer temporaries 0-5. Temporaries 6 and higher are assigned global variables. All floating-point variables are assigned global variables.
+
+Complex register allocation schemes (through graph coloring) are not implemented because there are only few registers. Besides, most integer registers have special purposes and floating-point registers are not directly accessible (only as a stack, all operations have ST(0) for the first and destination operand.
+
+
+6. NAMING CONVENTION
+--------------------
+
+Valid identifiers for Black Phantom's C must not start with leading underscore (which is also the ISO standard's requirement for conforming implementations).
+
+BPC implements C calling convention. All global, static and extern names start with an underscore. Function parameters are passed on stack, right-to-left order. The caller is responsible for cleaning up stack. Return value is in EAX register for integer return types, ST(0) for FP types. Aggregate types are returned on stack.
+
+
+7. ERROR HANDLING
+-----------------
+
+For the purposes of error handling, each token is assigned line and column during lexical parsing. When an unexpected token is encountered, the error is reported with the token at which it was spotted. Column is not reported because it may be misleading: it's impossible to tell how many spaces should be reserved for tabs identation.
+
+Error recovery mechanism uses global error variable (glob_error) to recover from nested recursion. Both tokens insertion into source stream (as if) and simple skipping to terminating symbol are used, depending on the context.
+
+
+8. MISCELLANEOUS IMPLEMENTATION DETAILS
+---------------------------------------
+
+i) Aggregate types handling
+
+Aggregate types are referred witht the help of __temp_addr global variable. It is used to calculate the correct offset and add to the base address for further dereference.
+
+ii) Address calculation
+
+Address calculation makes a separate bypass branch in most of the parser. The address taking unary operator & is valid for the following types of operands:
+
+(o) operand is a terminal, the address is taken simply with LEA instruction
+(o) operand is result of * unary operator. The result is as if both & and * were omitted, the operand of * operator is evaluated and assigned to the result.
+(o) operand is an l-value designating an object (struct/union member, array element etc). Address of the object is calculated with the help of __temp_addr variable, but then its value is taken and not dereferenced.
+
+iii) "restrict", "volatile" and "register" storage-class specifiers
+
+These storage-class specifiers are simply ignored. It is legitimate behavior under the stadard, because none of optimizations that may violate semantics of "volatile" specifier are attempted.
+
+iv) Function calls
+
+Arguments for function calls are parsed left-to-right as they appear, but the relevant intermediate code is not thrown to the output stream but rather stored in a stack of strings. Once all the argument are processed, the intermediate code is popped and put to the output, resulting in correct right-to-left arguments passing.
+
+To avoid temporaries collision every argument increments base temporary count.
+
+v) Sequence points and postfix unary operators.
+
+Postfix unary operators (postfix ++ and --) require that their operand keeps its value until the next sequence point (6.5.2.4). For that matter, intermediate code generated for these operators is stored in a special linked list of strings. This list is flushed when sequence point is encountered (by the function commit_seq_point()).
+
+vi) Bitfields
+
+Bitfields are not implemented yet.
+
+vii) Inlined assembly instructions
+
+If special tokens "__asm" and closing "__endasm" are encountered, lines between them are passed unlatered to the assembly output stream. No checks are performed. It is programmers responsibility that text embraces in __asm / __endasm clause contains valid assembly instructions.
